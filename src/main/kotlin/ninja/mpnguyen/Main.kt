@@ -1,9 +1,6 @@
 package ninja.mpnguyen
 
-import com.squareup.okhttp.Interceptor
-import com.squareup.okhttp.OkHttpClient
-import com.squareup.okhttp.Request
-import com.squareup.okhttp.Response
+import com.squareup.okhttp.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.SoftReference
@@ -14,6 +11,7 @@ import java.util.logging.Logger
 import kotlin.collections.emptySet
 import kotlin.collections.joinToString
 import kotlin.collections.plus
+import kotlin.collections.set
 import kotlin.text.removePrefix
 
 fun main(args: Array<String>) {
@@ -30,10 +28,11 @@ private fun searchForMissingComments(subreddits : Array<String>) {
         exec_service.submit(SubmissionVerifier(submission))
     }
     exec_service.awaitTermination(30L, TimeUnit.MINUTES)
+    Logger.getGlobal().info("Done.  All tasks complete.")
 }
 
 private fun getSubmissions(subreddits : Array<String>) : JSONArray {
-    val url = "https://www.reddit.com/r/${subreddits.joinToString("+")}/new/.json?limit=100"
+    val url = "https://oauth.reddit.com/r/${subreddits.joinToString("+")}/new/.json?limit=100"
     val request = Request.Builder().url(url).build()
     val response = RequestManager.handleRequest(request)
     val response_string = response.body().string()
@@ -53,10 +52,29 @@ class SubmissionVerifier(val submission : JSONObject) : Runnable {
 
     private fun checkSubmission(submission : JSONObject) {
         val submission_data = submission.getJSONObject("data")
+        val submission_id = submission_data.getString("id")
+        if (didWeDoThisAlready(submission_id)) {
+            Logger.getGlobal().info("We did this thread already: $submission_id")
+            return
+        }
+        val submission_comments = getSubmissionComments(submission)
         val username = submission_data.getString("author")
         val user_comments = getUserComments(username)
-        val submission_comments = getSubmissionComments(submission)
         crossReferenceComments(submission, user_comments, submission_comments)
+    }
+
+    private fun didWeDoThisAlready(submission_id: String) : Boolean {
+        val top_level_comments = ThreadCache.get(submission_id)
+                .getJSONObject(1)
+                .getJSONObject("data")
+                .getJSONArray("children")
+        for (i in 0 .. (top_level_comments.length() - 1)) {
+            val top_level_comment = top_level_comments.getJSONObject(i)
+            val author = top_level_comment.getJSONObject("data")
+                    .getString("author")
+            if (author == System.getenv("username")) return true
+        }
+        return false
     }
 
     private fun crossReferenceComments(
@@ -91,15 +109,12 @@ class SubmissionVerifier(val submission : JSONObject) : Runnable {
 
     private fun getSubmissionComments(submission : JSONObject) : Set<String> {
         val submission_id = submission.getJSONObject("data").getString("id")
-        val url = "https://www.reddit.com/comments/$submission_id/_/.json"
-        val request = Request.Builder().url(url).build()
-        val response = RequestManager.handleRequest(request)
-        val response_string = response.body().string()
-        val submission_comments = JSONArray(response_string).getJSONObject(1)
-        return aggregateSubmissionComments(submission_comments)
+        val thread = ThreadCache.get(submission_id)
+        val comments = aggregateThreadComments(thread.getJSONObject(1))
+        return comments
     }
 
-    private fun aggregateSubmissionComments(listing : JSONObject) : Set<String> {
+    private fun aggregateThreadComments(listing : JSONObject) : Set<String> {
         var comment_ids = emptySet<String>()
 
         val comments = listing.getJSONObject("data")
@@ -112,11 +127,37 @@ class SubmissionVerifier(val submission : JSONObject) : Runnable {
 
             val replies : JSONObject? = comment_data.optJSONObject("replies")
             if (replies != null) {
-                comment_ids += aggregateSubmissionComments(replies)
+                comment_ids += aggregateThreadComments(replies)
             }
         }
 
         return comment_ids
+    }
+}
+
+object ThreadCache {
+    private val cache : MutableMap<String, SoftReference<JSONArray>> = HashMap()
+
+    @Synchronized
+    fun get(submission_id : String) : JSONArray {
+        val cached_value = cache[submission_id]?.get()
+        if (cached_value != null) {
+            Logger.getGlobal().info("Cache hit for $submission_id")
+            return cached_value
+        }
+
+        val fetched_value = fetch(submission_id)
+        cache[submission_id] = SoftReference(fetched_value)
+        return fetched_value
+    }
+
+    private fun fetch(submission_id : String) : JSONArray {
+        val url = "https://oauth.reddit.com/comments/$submission_id/_/.json"
+        val request = Request.Builder().url(url).build()
+        val response = RequestManager.handleRequest(request)
+        val response_string = response.body().string()
+        val thread_comments = JSONArray(response_string)
+        return thread_comments
     }
 }
 
@@ -138,7 +179,7 @@ object UserCommentCache {
     }
 
     private fun fetch(username : String) : JSONArray {
-        val url = "https://www.reddit.com/user/$username/comments/.json?sort=new&limit=100"
+        val url = "https://oauth.reddit.com/user/$username/comments/.json?sort=new&limit=100"
         val request = Request.Builder().url(url).build()
         val response = RequestManager.handleRequest(request)
         val response_string = response.body().string()
@@ -155,6 +196,24 @@ object RequestManager {
     init {
         client.interceptors().add(UserAgentInterceptor())
         client.interceptors().add(LogInterceptor())
+
+
+        val body = FormEncodingBuilder()
+                .add("grant_type", "password")
+                .add("username", System.getenv("username"))
+                .add("password", System.getenv("password"))
+                .build()
+        val creds = Credentials.basic(System.getenv("app_id"), System.getenv("app_secret"))
+        val request = Request.Builder()
+                .url("https://www.reddit.com/api/v1/access_token")
+                .post(body)
+                .header("Authorization", creds)
+                .build()
+        val response = RequestManager.handleRequest(request)
+        val result = JSONObject(response.body().string())
+        val token_type = result.getString("token_type")
+        val access_token = result.getString("access_token")
+        client.interceptors().add(OAuthInterceptor(token_type, access_token))
     }
 
     @Synchronized
@@ -192,6 +251,14 @@ object RequestManager {
             val url = chain.request().urlString()
             Logger.getGlobal().info("Fetching data from $url")
             return chain.proceed(chain.request())
+        }
+    }
+
+    private class OAuthInterceptor(val token_type : String, val access_token: String) : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            val new_request = request.newBuilder().header("Authorization", "$token_type $access_token").build()
+            return chain.proceed(new_request)
         }
     }
 }
