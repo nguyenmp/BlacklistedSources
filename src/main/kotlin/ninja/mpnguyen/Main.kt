@@ -1,264 +1,184 @@
 package ninja.mpnguyen
 
+import com.fasterxml.jackson.core.type.TypeReference
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.squareup.okhttp.*
-import org.json.JSONArray
-import org.json.JSONObject
-import java.lang.ref.SoftReference
+import java.net.URLEncoder
 import java.util.*
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.Callable
 import java.util.logging.Logger
-import kotlin.collections.emptySet
-import kotlin.collections.joinToString
-import kotlin.collections.plus
-import kotlin.collections.set
-import kotlin.text.removePrefix
 
 fun main(args: Array<String>) {
-    searchForMissingComments(args)
+    val app_id = System.getenv("app_id")
+    val app_secret = System.getenv("app_secret")
+    val username = System.getenv("username")
+    val password = System.getenv("password")
+    val auth = Authenticate(app_id, app_secret, username, password)
+    val reddit_auth = auth.call()
+    Logger.getGlobal().info(reddit_auth.toString())
+    StoriesGet(reddit_auth).call().data.children.forEach {
+        if (it.data.saved) println(it.data.title)
+    }
+    OtherAuthenticate(
+            "UexYNFgc2lbvxA",
+            "http://scooterlabs.com/echo",
+            OtherAuthenticate.Duration.TEMPORARY,
+            arrayOf(OtherAuthenticate.Scope.READ),
+            UUID.randomUUID().toString()
+    ).call()
 }
 
-private fun searchForMissingComments(subreddits : Array<String>) {
-    val submissions : JSONArray = getSubmissions(subreddits)
+abstract class RedditRequest<T> : Callable<T> {
+    private val auth_root = "https://oauth.reddit.com"
+    private val non_auth_root = "https://www.reddit.com"
 
-    val num_processes = Runtime.getRuntime().availableProcessors()
-    val exec_service = Executors.newFixedThreadPool(num_processes)
-    for (i in 0 .. (submissions.length() - 1)) {
-        val submission = submissions.getJSONObject(i)
-        exec_service.submit(SubmissionVerifier(submission))
-    }
-    exec_service.awaitTermination(30L, TimeUnit.MINUTES)
-    Logger.getGlobal().info("Done.  All tasks complete.")
-}
+    override fun call() : T {
+        val client = OkHttpClient()
+        val interceptors = client.interceptors()
+        interceptors.add(user_agent_interceptor)
+        interceptors.add(oauth_interceptor)
 
-private fun getSubmissions(subreddits : Array<String>) : JSONArray {
-    val url = "https://oauth.reddit.com/r/${subreddits.joinToString("+")}/new/.json?limit=100"
-    val request = Request.Builder().url(url).build()
-    val response = RequestManager.handleRequest(request)
-    val response_string = response.body().string()
-    return JSONObject(response_string)
-            .getJSONObject("data")
-            .getJSONArray("children")
-}
+        val auth = auth()
+        val root = if (auth == null) non_auth_root else auth_root
 
-class SubmissionVerifier(val submission : JSONObject) : Runnable {
-    override fun run() {
-        try {
-            checkSubmission(submission)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun checkSubmission(submission : JSONObject) {
-        val submission_data = submission.getJSONObject("data")
-        val submission_id = submission_data.getString("id")
-        if (didWeDoThisAlready(submission_id)) {
-            Logger.getGlobal().info("We did this thread already: $submission_id")
-            return
-        }
-        val submission_comments = getSubmissionComments(submission)
-        val username = submission_data.getString("author")
-        val user_comments = getUserComments(username)
-        crossReferenceComments(submission, user_comments, submission_comments)
-    }
-
-    private fun didWeDoThisAlready(submission_id: String) : Boolean {
-        val top_level_comments = ThreadCache.get(submission_id)
-                .getJSONObject(1)
-                .getJSONObject("data")
-                .getJSONArray("children")
-        for (i in 0 .. (top_level_comments.length() - 1)) {
-            val top_level_comment = top_level_comments.getJSONObject(i)
-            val author = top_level_comment.getJSONObject("data")
-                    .getString("author")
-            if (author == System.getenv("username")) return true
-        }
-        return false
-    }
-
-    private fun crossReferenceComments(
-            submission: JSONObject,
-            user_comments: JSONArray,
-            submission_comments: Set<String>
-    ) {
-        val submission_name = submission.getJSONObject("data").getString("name")
-        Logger.getGlobal().info("Cross referencing comments for $submission_name")
-
-        for (i in 0 .. (user_comments.length() - 1)) {
-            val user_comment = user_comments.getJSONObject(i)
-            val user_comment_data = user_comment.getJSONObject("data")
-            val link_id = user_comment_data.getString("link_id")
-
-            val comment_id = user_comment_data.getString("id")
-            if (submission_name != link_id) {
-                // Do nothing
-            } else if (!submission_comments.contains(comment_id)) {
-                Logger.getGlobal().severe("Failed to find $comment_id for $link_id")
-                Logger.getGlobal().info("https://reddit.com/comments/${link_id.removePrefix("t3_")}/_/$comment_id/")
-            } else {
-                Logger.getGlobal().warning("Found $comment_id in $link_id")
-            }
-
-        }
-    }
-
-    private fun getUserComments(username : String) : JSONArray {
-        return UserCommentCache.get(username)
-    }
-
-    private fun getSubmissionComments(submission : JSONObject) : Set<String> {
-        val submission_id = submission.getJSONObject("data").getString("id")
-        val thread = ThreadCache.get(submission_id)
-        val comments = aggregateThreadComments(thread.getJSONObject(1))
-        return comments
-    }
-
-    private fun aggregateThreadComments(listing : JSONObject) : Set<String> {
-        var comment_ids = emptySet<String>()
-
-        val comments = listing.getJSONObject("data")
-                .getJSONArray("children")
-
-        for (i in 0 .. (comments.length() - 1)) {
-            val comment = comments.getJSONObject(i)
-            val comment_data = comment.getJSONObject("data")
-            comment_ids += comment_data.getString("id")
-
-            val replies : JSONObject? = comment_data.optJSONObject("replies")
-            if (replies != null) {
-                comment_ids += aggregateThreadComments(replies)
-            }
-        }
-
-        return comment_ids
-    }
-}
-
-object ThreadCache {
-    private val cache : MutableMap<String, SoftReference<JSONArray>> = HashMap()
-
-    @Synchronized
-    fun get(submission_id : String) : JSONArray {
-        val cached_value = cache[submission_id]?.get()
-        if (cached_value != null) {
-            Logger.getGlobal().info("Cache hit for $submission_id")
-            return cached_value
-        }
-
-        val fetched_value = fetch(submission_id)
-        cache[submission_id] = SoftReference(fetched_value)
-        return fetched_value
-    }
-
-    private fun fetch(submission_id : String) : JSONArray {
-        val url = "https://oauth.reddit.com/comments/$submission_id/_/.json"
+        val url = "$root/${endpoint()}.json?${query()}"
         val request = Request.Builder().url(url).build()
-        val response = RequestManager.handleRequest(request)
-        val response_string = response.body().string()
-        val thread_comments = JSONArray(response_string)
-        return thread_comments
+        val response = client.newCall(request).execute()
+        return parse(response)
     }
-}
 
-object UserCommentCache {
-    private val cache : MutableMap<String, SoftReference<JSONArray>> = HashMap()
+    abstract fun endpoint() : String
+    open fun query() : Array<Pair<String, String>>? = null
+    open fun body() : RequestBody? = null
+    open fun auth() : RedditAuth? = null
+    abstract fun parse(response : Response) : T
 
-    @Synchronized
-    fun get(username : String) : JSONArray {
-        // Check cache first
-        val cached_comments : JSONArray? = cache[username]?.get()
-        if (cached_comments != null) {
-            Logger.getGlobal().info("Cache hit for $username")
-            return cached_comments
+    private val user_agent_interceptor = Interceptor {
+        val original_request = it.request()
+        val new_request = original_request
+                .newBuilder()
+                .header("User-Agent", "Jaws")
+                .build()
+        it.proceed(new_request)
+    }
+
+    private val oauth_interceptor = Interceptor {
+        val auth = auth()
+        if (auth == null) {
+            it.proceed(it.request())
+        } else {
+            val original_request = it.request()
+            val new_request = original_request
+                    .newBuilder()
+                    .header("Authorization", "${auth.token_type} ${auth.access_token}")
+                    .build()
+            it.proceed(new_request)
         }
-
-        val fetched_comments = fetch(username)
-        cache.put(username, SoftReference(fetched_comments))
-        return fetched_comments
-    }
-
-    private fun fetch(username : String) : JSONArray {
-        val url = "https://oauth.reddit.com/user/$username/comments/.json?sort=new&limit=100"
-        val request = Request.Builder().url(url).build()
-        val response = RequestManager.handleRequest(request)
-        val response_string = response.body().string()
-        return JSONObject(response_string)
-                .getJSONObject("data")
-                .getJSONArray("children")
     }
 }
 
-object RequestManager {
-    private var lastRunTime: Long = 0L
-    private val client : OkHttpClient = OkHttpClient()
+class StoriesGet(val auth : RedditAuth? = null) : RedditRequest<ListingWrapper<Story>>() {
+    override fun endpoint(): String = "new"
 
-    init {
-        client.interceptors().add(UserAgentInterceptor())
-        client.interceptors().add(LogInterceptor())
+    override fun parse(response: Response): ListingWrapper<Story >{
+        val mapper = ObjectMapper().registerModule(KotlinModule())
+        val type = object : TypeReference<ListingWrapper<Story>>() {}
+        val json = response.body().string()
+        return mapper.readValue(json, type)
+    }
 
+    override fun auth() = auth
+}
 
+data class RedditAuth(
+        val access_token : String,
+        val expires_in : Int,
+        val scope : String,
+        val token_type : String
+)
+
+class Authenticate(
+        val client_id : String,
+        val client_secret : String,
+        val username : String,
+        val password : String
+) : Callable<RedditAuth> {
+    override fun call() : RedditAuth {
+        val url = "https://www.reddit.com/api/v1/access_token"
         val body = FormEncodingBuilder()
                 .add("grant_type", "password")
-                .add("username", System.getenv("username"))
-                .add("password", System.getenv("password"))
+                .add("username", username)
+                .add("password", password)
                 .build()
-        val creds = Credentials.basic(System.getenv("app_id"), System.getenv("app_secret"))
-        val request = Request.Builder()
-                .url("https://www.reddit.com/api/v1/access_token")
+        val client = OkHttpClient()
+        val credentials = Credentials.basic(client_id, client_secret)
+        val request = Request
+                .Builder()
+                .url(url)
                 .post(body)
-                .header("Authorization", creds)
+                .addHeader("Authorization", credentials)
                 .build()
-        val response = RequestManager.handleRequest(request)
-        val result = JSONObject(response.body().string())
-        val token_type = result.getString("token_type")
-        val access_token = result.getString("access_token")
-        client.interceptors().add(OAuthInterceptor(token_type, access_token))
+        val response = client.newCall(request).execute()
+        val mapper = ObjectMapper().registerModule(KotlinModule())
+        val type = object : TypeReference<RedditAuth>() {}
+        val json = response.body().string()
+        return mapper.readValue<RedditAuth>(json, type)
+    }
+}
+
+class OtherAuthenticate(
+        val client_id : String,
+        val redirect_url : String,
+        val duration : Duration,
+        val scope : Array<Scope>,
+        val state : String? = null
+) : Callable<RedditAuth> {
+    enum class Duration(val representation : String) {
+        TEMPORARY("temporary"),
+        PERMANENT("permanent"),
+    }
+    enum class Scope(val representation : String) {
+        IDENTITY("identity"),
+        EDIT("edit"),
+        FLAIR("flair"),
+        HISTORY("history"),
+        MOD_CONFIG("modconfig"),
+        MOD_FLAIR("modflair"),
+        MOD_LOG("modlog"),
+        MOD_POSTS("modposts"),
+        MOD_WIKI("modwiki"),
+        MY_SUBREDDITS("mysubreddits"),
+        PRIVATE_MESSAGES("privatemessages"),
+        READ("read"),
+        REPORT("report"),
+        SAVE("save"),
+        SUBMIT("submit"),
+        SUBSCRIBE("subscribe"),
+        VOTE("vote"),
+        WIKI_EDIT("wikiedit"),
+        WIKI_READ("wikiread"),
     }
 
-    @Synchronized
-    fun handleRequest(request : Request) : Response {
-        // Wait for 2 seconds since last request
-        val currentTime = System.currentTimeMillis()
-        val elapsedTime = currentTime - lastRunTime
-        val timeout = 2000
-        val time_to_wait = timeout - elapsedTime
-        if (time_to_wait > 0) {
-            Logger.getGlobal()
-                    .info("Waiting for $time_to_wait milliseconds")
-            Thread.sleep(time_to_wait)
-        }
-
-        // Now do the thing
-        val response =  client.newCall(request).execute()
-        lastRunTime = System.currentTimeMillis()
-        return response
-    }
-
-    private class UserAgentInterceptor : Interceptor {
-        override fun intercept(chain: Interceptor.Chain): Response {
-            val request = chain.request()
-            val new_request = request
-                    .newBuilder()
-                    .header("User-Agent", "source finder by /u/markerz")
-                    .build()
-            return chain.proceed(new_request)
-        }
-    }
-
-    private class LogInterceptor : Interceptor {
-        override fun intercept(chain: Interceptor.Chain): Response {
-            val url = chain.request().urlString()
-            Logger.getGlobal().info("Fetching data from $url")
-            return chain.proceed(chain.request())
-        }
-    }
-
-    private class OAuthInterceptor(val token_type : String, val access_token: String) : Interceptor {
-        override fun intercept(chain: Interceptor.Chain): Response {
-            val request = chain.request()
-            val new_request = request.newBuilder().header("Authorization", "$token_type $access_token").build()
-            return chain.proceed(new_request)
-        }
+    override fun call(): RedditAuth {
+        val base = "https://www.reddit.com"
+        val endpoint = "api/v1/authorize"
+        val query = arrayOf(
+                Pair("client_id", client_id),
+                Pair("response_type", "code"),
+                Pair("state", state),
+                Pair("redirect_uri", redirect_url),
+                Pair("duration", duration.representation),
+                Pair("scope", scope.map{it.representation}.joinToString(","))
+        )
+        val query_string = query.map {
+            pair ->
+                val key = URLEncoder.encode(pair.first, "UTF-8")
+                val value = URLEncoder.encode(pair.second, "UTF-8")
+                "$key=$value"
+        }.joinToString("&")
+        val url = "$base/$endpoint?$query_string"
+        Logger.getGlobal().info(url)
+        return TODO()
     }
 }
