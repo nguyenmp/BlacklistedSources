@@ -1,1 +1,31 @@
-Hello World
+<html>
+    <head>
+        <script>
+            function fill_forms() {
+                var hash_params = window.location.hash.substr(1).split('&');
+                for (var hash_param in hash_params) {
+                    var pair = hash_param.split('=')
+                    switch(pair[0]) {
+                        case "state":
+                            document.getElementById("state").innerHTML = pair[1]
+                            break;
+                        case "code":
+                            document.getElementById("code").innerHTML = pair[1]
+                            break;
+                        case "error":
+                            document.getElementById("error").innerHTML = pair[1]
+                            break;
+                        default:
+                            console.log("Unknown key: {}".format(pair[0]));
+                            break;
+                    }
+                }
+            }
+        </script>
+    </head>
+    <body onload="fill_forms">
+        <p>State: <span id="state"></span></p>
+        <p>Code: <span id="code"></span></p>
+        <p>Error: <span id="error"></span></p>
+    </body>
+</html>
