@@ -1,0 +1,3 @@
+[submodule "lanterna"]
+	path = lanterna
+	url = git@github.com:nguyenmp/lanterna.git

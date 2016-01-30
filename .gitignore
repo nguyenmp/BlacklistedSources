@@ -7,3 +7,5 @@ out/
 
 build/
 .gradle/
+
+app/credentials.json

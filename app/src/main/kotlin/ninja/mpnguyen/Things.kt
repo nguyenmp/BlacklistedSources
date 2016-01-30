@@ -17,7 +17,6 @@ data class ThingWrapper<Thing>(
         val data : Thing
 )
 
-//@JsonIgnoreProperties(ignoreUnknown = true)
 data class Story(
         val domain : String,
         val banned_by : Any?,
@@ -73,4 +72,13 @@ data class Story(
         val title : String,
         val url : String,
         val quarantine : Boolean
+)
+
+data class Thread(
+        val story : ListingWrapper<Story>,
+        val comments : ListingWrapper<Comment>
+)
+
+data class Comment(
+        val foo : String
 )

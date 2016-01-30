@@ -11,7 +11,7 @@ apply plugin: 'kotlin'
 
 
 buildscript {
-    ext.kotlin_version = '1.0.0-beta-4584'
+    ext.kotlin_version = '1.0.0-beta-4589'
     repositories {
         mavenCentral()
     }
@@ -27,13 +27,12 @@ repositories {
 }
 
 dependencies {
+    compile project(':lanterna')
     compile "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
     compile "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
     compile "org.jetbrains.kotlin:kotlin-runtime:$kotlin_version"
     compile "org.jetbrains.kotlin:kotlin-compiler:$kotlin_version"
     compile 'com.squareup.okhttp:okhttp:2.7.0'
-//    compile 'com.google.code.gson:gson:2.5'
     compile "com.fasterxml.jackson.module:jackson-module-kotlin:2.6.4"
-    compile 'com.googlecode.lanterna:lanterna:3.0.0-beta1'
     testCompile 'junit:junit:4.12'
 }
